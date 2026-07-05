@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mit deinem Miner verbinden",
+        "description": "Gib die IP-Adresse oder den Hostnamen deines NerdAxe/NerdQAxe/NerdOCTAXE-Geräts ein.",
+        "data": {
+          "host": "Host"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Gerät unter dieser Adresse nicht erreichbar.",
+      "unknown": "Unerwarteter Fehler."
+    },
+    "abort": {
+      "already_configured": "Dieses Gerät ist bereits eingerichtet."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "hashrate": { "name": "Hashrate" },
+      "hashrate_1h": { "name": "Hashrate (1h-Mittel)" },
+      "power": { "name": "Leistung" },
+      "voltage": { "name": "Versorgungsspannung" },
+      "current": { "name": "Stromstärke" },
+      "chip_temperature": { "name": "Chip-Temperatur" },
+      "vr_temperature": { "name": "Spannungsregler-Temperatur" },
+      "fan_speed": { "name": "Lüfterdrehzahl" },
+      "frequency": { "name": "Frequenz" },
+      "core_voltage_actual": { "name": "Kernspannung (tatsächlich)" },
+      "shares_accepted": { "name": "Akzeptierte Shares" },
+      "shares_rejected": { "name": "Abgelehnte Shares" },
+      "duplicate_hw_nonces": { "name": "Doppelte HW-Nonces" },
+      "best_difficulty": { "name": "Beste Difficulty" },
+      "wifi_rssi": { "name": "WLAN-Signalstärke" },
+      "uptime": { "name": "Laufzeit" }
+    },
+    "select": {
+      "power_profile": {
+        "name": "Leistungsprofil",
+        "state": {
+          "off": "Aus",
+          "eco": "Eco",
+          "normal": "Normal"
+        }
+      }
+    }
+  }
+}
