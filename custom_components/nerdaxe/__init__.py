@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_HOST
 from .coordinator import NerdAxeCoordinator
 
-PLATFORMS = ["sensor", "select"]
+PLATFORMS = ["sensor", "select", "button"]
 
 type NerdAxeConfigEntry = ConfigEntry[NerdAxeCoordinator]
 

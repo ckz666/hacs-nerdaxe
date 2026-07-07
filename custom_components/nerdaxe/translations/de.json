@@ -46,6 +46,10 @@
           "normal": "Normal"
         }
       }
+    },
+    "button": {
+      "shutdown": { "name": "Ausschalten" },
+      "restart": { "name": "Neustart" }
     }
   }
 }

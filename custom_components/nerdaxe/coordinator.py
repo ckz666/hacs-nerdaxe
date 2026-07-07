@@ -104,6 +104,21 @@ class NerdAxeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"Error shutting down {self.host}: {err}") from err
         await self.async_request_refresh()
 
+    async def async_restart(self) -> None:
+        """Fire-and-forget POST /api/system/restart for the manual restart
+        button -- unlike _async_wake(), doesn't block waiting for the device
+        to come back (a button press shouldn't hang the UI for ~20-30s)."""
+        session = async_get_clientsession(self.hass)
+        try:
+            async with async_timeout.timeout(10):
+                async with session.post(f"{self.base_url}{API_RESTART_PATH}") as resp:
+                    if resp.status != 200:
+                        raise UpdateFailed(
+                            f"Restart POST to {self.host} failed with status {resp.status}"
+                        )
+        except (TimeoutError, ConnectionError) as err:
+            raise UpdateFailed(f"Error restarting {self.host}: {err}") from err
+
     async def _async_wake(self) -> None:
         """POST /api/system/restart and poll until the device answers again.
         Takes ~20-30s on a NerdOCTAXE-Gamma (measured)."""
