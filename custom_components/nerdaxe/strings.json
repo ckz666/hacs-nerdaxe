@@ -33,6 +33,7 @@
       "shares_rejected": { "name": "Shares rejected" },
       "duplicate_hw_nonces": { "name": "Duplicate HW nonces" },
       "best_difficulty": { "name": "Best difficulty" },
+      "best_session_difficulty": { "name": "Best difficulty (session)" },
       "wifi_rssi": { "name": "WiFi signal strength" },
       "uptime": { "name": "Uptime" }
     },

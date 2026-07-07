@@ -143,8 +143,14 @@ SENSOR_TYPES: tuple[NerdAxeSensorDescription, ...] = (
         translation_key="best_difficulty",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
         value_fn=lambda d: d.get("bestDiff"),
+    ),
+    NerdAxeSensorDescription(
+        key="bestSessionDiff",
+        translation_key="best_session_difficulty",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.get("bestSessionDiff"),
     ),
     NerdAxeSensorDescription(
         key="wifiRSSI",

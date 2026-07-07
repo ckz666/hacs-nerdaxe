@@ -33,6 +33,7 @@
       "shares_rejected": { "name": "Abgelehnte Shares" },
       "duplicate_hw_nonces": { "name": "Doppelte HW-Nonces" },
       "best_difficulty": { "name": "Beste Difficulty" },
+      "best_session_difficulty": { "name": "Beste Difficulty (Session)" },
       "wifi_rssi": { "name": "WLAN-Signalstärke" },
       "uptime": { "name": "Laufzeit" }
     },
