@@ -43,7 +43,8 @@
         "state": {
           "off": "Off",
           "eco": "Eco",
-          "normal": "Normal"
+          "normal": "Normal",
+          "turbo": "Turbo"
         }
       }
     },

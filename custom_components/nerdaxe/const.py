@@ -23,9 +23,16 @@ ATTR_CORE_VOLTAGE = "coreVoltage"
 # window; 1060mV showed voltage-regulation sag (1060 requested -> ~1054
 # actual, near the board's absMinVoltage of 1050) and the first rejected
 # share. Re-tune per board/chip if you use this on different hardware.
+#
+# "turbo" is the top of the board's own frequency dropdown (TPS53667 6-phase
+# variant), stepped up from "normal" in 25MHz/10mV increments over ~50min —
+# 54.1°C chip / 65°C VR at the top, zero rejected shares throughout, +14%
+# hashrate over "normal" for +21% power (worse J/TH — a throughput/efficiency
+# tradeoff, not a stability one).
 PROFILES: dict[str, dict[str, int]] = {
     "eco": {ATTR_FREQUENCY: 400, ATTR_CORE_VOLTAGE: 1070},
     "normal": {ATTR_FREQUENCY: 700, ATTR_CORE_VOLTAGE: 1210},
+    "turbo": {ATTR_FREQUENCY: 800, ATTR_CORE_VOLTAGE: 1250},
 }
 
 # Not a frequency/voltage pair — POSTs /api/system/shutdown instead, which
