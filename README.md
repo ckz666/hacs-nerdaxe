@@ -17,26 +17,37 @@ No cloud, no account, purely local polling of `http://<device-ip>/api/system/inf
 
 ## Entities
 
-**Sensors** (polled every 30s): hashrate (current + 1h average), power, chip
+**Sensors** (polled every 30s), enabled by default: hashrate, power, chip
 temperature, voltage-regulator temperature, fan speed, frequency, actual core
-voltage, accepted/rejected shares, duplicate HW nonces, best difficulty, WiFi
-signal, uptime.
+voltage, accepted/rejected shares, duplicate HW nonces, best difficulty, best
+session difficulty.
 
-**`select.<device>_power_profile`** — `normal` / `eco` / `off`. `normal` and
-`eco` PATCH frequency + core voltage to the device live (no reboot). `off`
-POSTs `/api/system/shutdown`, which disables the ASICs and voltage regulators
-(~0.06W measured, down from >100W) while leaving WiFi/HTTP alive — verified
-against the firmware source that nothing clears this except a restart, so
-selecting `eco`/`normal` again from `off` first POSTs `/api/system/restart`
-and polls for up to 40s until the device answers again, then applies the
-target settings. That round trip takes ~20-30s in practice; the select
-service call will just sit there until it's done, which is normal.
+Disabled by default (diagnostic/niche — enable manually if you want them):
+1h-average hashrate, raw voltage, raw current, WiFi signal strength, uptime.
+
+**Buttons**:
+- **Restart** — fire-and-forget `POST /api/system/restart`. Doesn't wait for
+  the device to come back, unlike waking from `off` below — a button press
+  shouldn't hang the UI for the ~20-30s a real restart takes.
+- **Shutdown** — same effect as selecting `off` on the power-profile entity
+  below (`POST /api/system/shutdown`).
+
+**`select.<device>_power_profile`** — `off` / `eco` / `normal` / `turbo`.
+`eco`, `normal`, and `turbo` PATCH frequency + core voltage to the device
+live (no reboot). `off` POSTs `/api/system/shutdown`, which disables the
+ASICs and voltage regulators (~0.06W measured, down from >100W) while
+leaving WiFi/HTTP alive — verified against the firmware source that nothing
+clears this except a restart, so selecting a power profile again from `off`
+first POSTs `/api/system/restart` and polls for up to 40s until the device
+answers again, then applies the target settings. That round trip takes
+~20-30s in practice; the select service call will just sit there until it's
+done, which is normal.
 
 If someone changes settings directly on the device's own web UI to something
 that doesn't match any known profile, this entity shows as unknown rather
 than guessing — that's intentional, not a bug.
 
-## Eco profile
+## Power profiles
 
 Defined in `custom_components/nerdaxe/const.py`:
 
@@ -44,11 +55,12 @@ Defined in `custom_components/nerdaxe/const.py`:
 PROFILES = {
     "eco":    {"frequency": 400, "coreVoltage": 1070},
     "normal": {"frequency": 700, "coreVoltage": 1210},
+    "turbo":  {"frequency": 800, "coreVoltage": 1250},
 }
 ```
 
-These specific numbers came from stepping frequency and voltage down together
-on a NerdOCTAXE-Gamma (8x BM1370) and watching `sharesRejected` /
+`eco`/`normal` came from stepping frequency and voltage down together on a
+NerdOCTAXE-Gamma (8x BM1370) and watching `sharesRejected` /
 `duplicateHWNonces` at each step over a 5-minute window:
 
 | Frequency | Voltage (requested / actual) | Power | Result |
@@ -60,20 +72,30 @@ on a NerdOCTAXE-Gamma (8x BM1370) and watching `sharesRejected` /
 213 W → 109 W is roughly **49% less power** for ~54% of the hashrate, and the
 efficiency (W per TH/s) actually improves slightly at the lower point.
 
-**Retune this for your own board/chip before trusting it** — silicon varies
-between individual chips and boards, this is not a universal safe value. Step
-down in ~10mV increments at your target frequency and watch `sharesRejected`
-climb before you settle on a number. Individual per-ASIC control isn't
-available on 8-chip chained boards like the NerdOCTAXE (they're a single hash
-chain on one voltage rail), so this is necessarily a whole-board profile, not
-per-chip.
+`turbo` is the top of the same board's frequency range (TPS53667 6-phase
+variant), stepped up from `normal` in 25MHz/10mV increments over ~50 minutes,
+watching chip/VR temperature and rejected shares at each step: 54.1°C chip /
+65°C VR at the top, zero rejected shares throughout, **+14% hashrate over
+`normal` for +21% power** — a throughput/efficiency tradeoff (worse J/TH),
+not a stability issue.
+
+**Retune all of this for your own board/chip before trusting it** — silicon
+varies between individual chips and boards, none of these are universal safe
+values. Step in small increments at your target frequency and watch
+`sharesRejected` (and chip/VR temperature for anything above `normal`) before
+you settle on a number. Individual per-ASIC control isn't available on
+8-chip chained boards like the NerdOCTAXE (they're a single hash chain on one
+voltage rail), so this is necessarily a whole-board profile, not per-chip.
 
 ## Example automation: three-tier PV following
 
 Adjust `sensor.pv_surplus` (or whatever your grid-power sensor is called —
 mind the sign convention, see below) and the thresholds to your own setup.
 `off` below ~50W surplus (not worth running at all), `eco` between 50-250W,
-`normal` above 250W:
+`normal` above 250W. Add a fourth `numeric_state` trigger/choice the same way
+if you want `turbo` at some higher surplus threshold — omitted here to keep
+the example simple, since `turbo`'s +21% power for +14% hashrate is a much
+more marginal trade than `eco` vs. `normal`.
 
 ```yaml
 alias: Miner PV-following power profile
