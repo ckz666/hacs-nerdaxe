@@ -147,141 +147,159 @@ when there's no surplus.
 
 ## Extended example: forecast + battery-aware following
 
-The plain-surplus version above only looks at *this instant*. It'll happily
-drain your battery chasing a `turbo` reading that a cloud kills 30 seconds
-later, and it'll shut the miner off during a brief consumption spike even
-though the battery's already full and that power has nowhere else to go.
-This version adds three more signals: how much sun is still forecast today,
-how full the battery already is (and how soon it'll top up), and a
-smoothed house-consumption baseline so short-lived spikes don't flip the
-profile back and forth.
+A plain-surplus automation only looks at *this instant*. It'll happily drain
+the battery chasing a `turbo` reading that a cloud kills 30 seconds later,
+and it'll shut the miner off during a brief consumption spike even though
+the battery's already full and that power has nowhere else to go. This
+version adds PV forecast and battery SOC/ETA on top of a grid-surplus
+reading, so the profile reacts to where the day's energy is headed instead
+of just the current number.
 
-**This logic is a design sketch, not something measured against real
-hardware/data like the profile wattages above** — treat the thresholds as a
-starting point and watch how it actually behaves for a few days before
-trusting it unattended.
-
-Entity IDs below assume the official **Forecast.Solar** integration
-(`sensor.energy_production_today_remaining`, kWh remaining for the rest of
-today). Swap in your own if you use Solcast or your inverter vendor's own
-forecast instead.
-
-For **SolaX**, `sensor.battery_soc` should map to whatever your SolaX
-integration calls the battery capacity/SOC sensor — with the popular
-[solax_modbus](https://github.com/wills106/homeassistant-solax-modbus) HACS
-integration this is typically something like `sensor.solax_battery_capacity`
-(exact name depends on your inverter model/prefix — check **Developer
-Tools → States** and filter for `battery` to get your real entity ID rather
-than trusting this name blindly). solax_modbus does **not** expose a
-time-to-full sensor directly, so `battery_eta_full_min` needs to be computed
-rather than read — a template helper for that is below. If you're on a
-different SolaX integration (cloud-API based) that does expose one, use that
-directly instead and skip the template.
-
-```yaml
-# Template helper (Settings -> Devices & Services -> Helpers -> Template ->
-# Template a sensor), computing minutes-to-full from SOC + battery capacity
-# + current charge power. Adjust entity IDs and battery_capacity_kwh to
-# your actual system.
-- name: "Battery Time To Full"
-  unit_of_measurement: "min"
-  state: >
-    {% set soc = states('sensor.solax_battery_capacity') | float(100) %}
-    {% set charge_power_w = states('sensor.solax_battery_power_charge') | float(0) %}
-    {% set battery_capacity_kwh = 10.0 %}  {# your usable battery capacity #}
-    {% if charge_power_w <= 0 or soc >= 100 %}
-      0
-    {% else %}
-      {{ (((100 - soc) / 100 * battery_capacity_kwh * 1000) / charge_power_w * 60) | round(0) }}
-    {% endif %}
-```
-
-`sensor.house_average_consumption` is meant to be a helper you create
-yourself (e.g. a `Statistics` or `derivative` helper with a 10-15 min window
-over your house-load sensor) — it exists purely to stop the miner flapping
-on a kettle or oven cycling on.
+**This is a real, currently-deployed automation** (SolaX inverter/battery
+via [solax_modbus](https://github.com/wills106/homeassistant-solax-modbus),
+Tasmota grid meter, official **Forecast.Solar** integration with 4 array
+orientations) — the templates below were rendered live against real sensor
+data and the automation was triggered end-to-end without errors before this
+was written up. What's **not** independently validated is the tuning itself
+(the 30%/95%/15min/150W/etc. thresholds) — those are this author's first-pass
+numbers, not something watched over weeks of real operation. Swap in your
+own entity IDs (grid meter, select entity, battery sensors — check
+**Developer Tools → States**) and expect to retune the thresholds for your
+own battery capacity and consumption pattern.
 
 ```yaml
 alias: Miner PV+battery-aware power profile
 description: >
-  Extends the plain-surplus automation with today's remaining PV forecast,
-  battery state of charge / time-to-full, and a smoothed house-consumption
-  baseline, so the profile reacts to where the day's energy is headed
-  instead of just this instant's surplus reading.
+  Four-tier (off/eco/normal/turbo) on grid surplus (sensor.leistung_2,
+  Tasmota meter, negative = feed-in/surplus), extended with battery
+  SOC/ETA-to-full and today's remaining PV forecast. Battery protection
+  takes priority over the plain surplus tier: low SOC caps the profile,
+  a full/near-full battery gets bumped up early since the marginal watt is
+  headed for curtailment/export otherwise.
 triggers:
+  # Original surplus-tier triggers — same 50/250/350W thresholds as a
+  # plain-surplus automation, just re-fired here so a fast-changing
+  # surplus is still picked up immediately rather than waiting for the
+  # timer trigger below.
+  - trigger: numeric_state
+    entity_id: sensor.leistung_2
+    above: -50
+    for: { minutes: 5 }
+    id: leistung
+  - trigger: numeric_state
+    entity_id: sensor.leistung_2
+    below: -50
+    above: -250
+    for: { minutes: 5 }
+    id: leistung
+  - trigger: numeric_state
+    entity_id: sensor.leistung_2
+    below: -250
+    above: -350
+    for: { minutes: 5 }
+    id: leistung
+  - trigger: numeric_state
+    entity_id: sensor.leistung_2
+    below: -350
+    for: { minutes: 5 }
+    id: leistung
+  - trigger: state
+    entity_id: sensor.solax_battery_capacity
+    for: { minutes: 5 }
+    id: akku
+  # Catch-all: re-evaluates every 5 minutes even with no state change, so
+  # a battery crossing 95% mid-tier (rather than via a discrete event) or
+  # the forecast quietly dropping still gets picked up.
   - trigger: time_pattern
     minutes: "/5"
+    id: takt
 conditions: []
 actions:
   - variables:
-      # --- ADJUST THESE ENTITY IDS to match your own setup ---
-      pv_surplus: "{{ states('sensor.pv_surplus') | float(0) }}"
-      pv_forecast_remaining_kwh: "{{ states('sensor.energy_production_today_remaining') | float(0) }}"
-      battery_soc: "{{ states('sensor.battery_soc') | float(100) }}"
-      battery_eta_full_min: "{{ states('sensor.battery_time_to_full') | float(999) }}"
-      house_avg_consumption: "{{ states('sensor.house_average_consumption') | float(0) }}"
-
-      # Battery is low: that marginal watt is worth more to the house/
-      # battery right now than to the miner. Cap at "eco" even with some
-      # surplus; force "off" if there's barely any surplus at all.
-      battery_low: "{{ battery_soc < 30 }}"
-      # Battery is effectively full, or about to be within a few minutes:
-      # the marginal watt is now worth more to the miner than the battery,
-      # since it's headed for curtailment/grid export otherwise. Lean into
-      # turbo rather than waiting for a bigger instantaneous surplus.
-      battery_topped_up: "{{ battery_soc > 95 or battery_eta_full_min < 15 }}"
-      # Meaningful sun left today -> safe to spend surplus now instead of
-      # holding back "just in case" for a shortfall that likely won't come.
-      strong_forecast_left: "{{ pv_forecast_remaining_kwh > 5 }}"
-      # Smoothed baseline instead of the raw instantaneous surplus, so a
-      # kettle or oven cycling on for a few minutes doesn't flip the
-      # profile back and forth.
-      effective_surplus: "{{ pv_surplus - (house_avg_consumption * 0.2) }}"
+      # --- entity IDs below are this author's — swap for your own ---
+      ueberschuss_w: "{{ (states('sensor.leistung_2') | float(0)) * -1 }}"
+      soc: "{{ states('sensor.solax_battery_capacity') | float(100) }}"
+      ladeleistung_w: "{{ states('sensor.solax_battery_power_charge') | float(0) }}"
+      akku_kapazitaet_wh: 24000  # usable battery capacity — adjust to yours
+      hausverbrauch_w: "{{ states('sensor.solax_house_load') | float(0) }}"
+      # Sum of all forecast planes/orientations — a single-array setup
+      # only needs the one sensor.energy_production_today_remaining term.
+      pv_rest_heute_kwh: >
+        {{ (states('sensor.energy_production_today_remaining') | float(0))
+         + (states('sensor.energy_production_today_remaining_2') | float(0))
+         + (states('sensor.energy_production_today_remaining_3') | float(0))
+         + (states('sensor.energy_production_today_remaining_4') | float(0)) }}
+  - variables:
+      # solax_modbus doesn't expose a time-to-full sensor, so it's computed
+      # here from SOC + charge power + capacity instead. If your battery
+      # integration already provides one, read that directly and drop this.
+      eta_minuten: >
+        {{ (0 if (ladeleistung_w <= 0 or soc >= 100) else
+           (((100 - soc) / 100 * akku_kapazitaet_wh) / ladeleistung_w * 60))
+           | round(0) }}
+      akku_niedrig: "{{ soc < 30 }}"
+      viel_sonne_uebrig: "{{ pv_rest_heute_kwh > 5 }}"
+  - variables:
+      akku_fast_voll: >
+        {{ soc > 95 or (eta_minuten | float(999) > 0 and eta_minuten | float(999) < 15) }}
   - choose:
-      # Battery needs the power more than the miner does right now.
+      # Battery needs the power more than the miner does right now — cap
+      # at eco (or off, if there's barely any surplus at all), unless the
+      # surplus is big enough for both.
       - conditions:
-          - "{{ battery_low and effective_surplus < 250 }}"
+          - "{{ akku_niedrig and ueberschuss_w < 350 }}"
         sequence:
           - action: select.select_option
-            target: { entity_id: select.nerdoctaxe_power_profile }
-            data: { option: "off" }
-      # Battery's done (or nearly), and there's real surplus -> don't waste it.
+            target: { entity_id: select.octaxe_leistungsprofil }
+            data: { option: "{{ 'eco' if ueberschuss_w > 50 else 'off' }}" }
+      # Battery's done (or nearly) — don't waste the marginal watt on
+      # curtailment/export, push it into the miner instead.
       - conditions:
-          - "{{ battery_topped_up and effective_surplus > 100 }}"
+          - "{{ akku_fast_voll and ueberschuss_w > 150 }}"
         sequence:
           - action: select.select_option
-            target: { entity_id: select.nerdoctaxe_power_profile }
+            target: { entity_id: select.octaxe_leistungsprofil }
+            data: { option: "turbo" }
+      - conditions:
+          - "{{ ueberschuss_w > 350 }}"
+        sequence:
+          - action: select.select_option
+            target: { entity_id: select.octaxe_leistungsprofil }
             data: { option: "turbo" }
       # Solid surplus, or decent surplus with plenty more sun forecast today.
       - conditions:
-          - "{{ effective_surplus > 250 or (strong_forecast_left and effective_surplus > 100) }}"
+          - "{{ ueberschuss_w > 250 or (viel_sonne_uebrig and ueberschuss_w > 150) }}"
         sequence:
           - action: select.select_option
-            target: { entity_id: select.nerdoctaxe_power_profile }
+            target: { entity_id: select.octaxe_leistungsprofil }
             data: { option: "normal" }
       - conditions:
-          - "{{ effective_surplus > 50 }}"
+          - "{{ ueberschuss_w > 50 }}"
         sequence:
           - action: select.select_option
-            target: { entity_id: select.nerdoctaxe_power_profile }
+            target: { entity_id: select.octaxe_leistungsprofil }
             data: { option: "eco" }
     default:
       - action: select.select_option
-        target: { entity_id: select.nerdoctaxe_power_profile }
+        target: { entity_id: select.octaxe_leistungsprofil }
         data: { option: "off" }
 mode: single
 ```
 
-A `time_pattern` trigger (every 5 minutes) is used instead of a `state`
-trigger with `for:` — a `for:` duration on a continuously-changing power
-sensor practically never fires, since it requires the state to stop
-changing entirely for that whole window. Polling on a timer sidesteps that
-and reads all the current values fresh each time.
+`sensor.solax_house_load` (instantaneous house consumption) is read into
+`hausverbrauch_w` but deliberately **not** used to gate any decision — the
+grid-meter reading already nets out house consumption vs. PV vs. battery
+flow at the connection point, so gating on it too would be redundant rather
+than additive. It's there for logging/future refinement, e.g. if you want
+to build a smoothed-average helper (`Statistics`/`derivative`) to catch
+cases where the meter reading lags a real consumption change.
 
-`effective_surplus` subtracting a fraction of `house_avg_consumption` is one
-way to build in a safety margin against baseline load that a laggy
-`pv_surplus` sensor hasn't caught up to yet — the `0.2` factor is a guess,
-not a measurement; tune it against your own sensor's actual lag and noise.
+A `time_pattern` trigger (every 5 minutes) runs alongside the original
+`numeric_state`/`for:` triggers rather than replacing them — `for:` on a
+continuously-changing power sensor only fires when the state genuinely
+stops changing for the whole window, which a battery SOC crossing a
+threshold gradually (not via a discrete event) won't reliably do on its
+own. The timer catches what the event-based triggers miss.
 
 ## Tested against
 
