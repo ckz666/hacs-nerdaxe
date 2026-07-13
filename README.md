@@ -145,6 +145,144 @@ Check your actual sensor's sign with real numbers before trusting the
 thresholds above — get it backwards and the miner runs full power exactly
 when there's no surplus.
 
+## Extended example: forecast + battery-aware following
+
+The plain-surplus version above only looks at *this instant*. It'll happily
+drain your battery chasing a `turbo` reading that a cloud kills 30 seconds
+later, and it'll shut the miner off during a brief consumption spike even
+though the battery's already full and that power has nowhere else to go.
+This version adds three more signals: how much sun is still forecast today,
+how full the battery already is (and how soon it'll top up), and a
+smoothed house-consumption baseline so short-lived spikes don't flip the
+profile back and forth.
+
+**This logic is a design sketch, not something measured against real
+hardware/data like the profile wattages above** — treat the thresholds as a
+starting point and watch how it actually behaves for a few days before
+trusting it unattended.
+
+Entity IDs below assume the official **Forecast.Solar** integration
+(`sensor.energy_production_today_remaining`, kWh remaining for the rest of
+today). Swap in your own if you use Solcast or your inverter vendor's own
+forecast instead.
+
+For **SolaX**, `sensor.battery_soc` should map to whatever your SolaX
+integration calls the battery capacity/SOC sensor — with the popular
+[solax_modbus](https://github.com/wills106/homeassistant-solax-modbus) HACS
+integration this is typically something like `sensor.solax_battery_capacity`
+(exact name depends on your inverter model/prefix — check **Developer
+Tools → States** and filter for `battery` to get your real entity ID rather
+than trusting this name blindly). solax_modbus does **not** expose a
+time-to-full sensor directly, so `battery_eta_full_min` needs to be computed
+rather than read — a template helper for that is below. If you're on a
+different SolaX integration (cloud-API based) that does expose one, use that
+directly instead and skip the template.
+
+```yaml
+# Template helper (Settings -> Devices & Services -> Helpers -> Template ->
+# Template a sensor), computing minutes-to-full from SOC + battery capacity
+# + current charge power. Adjust entity IDs and battery_capacity_kwh to
+# your actual system.
+- name: "Battery Time To Full"
+  unit_of_measurement: "min"
+  state: >
+    {% set soc = states('sensor.solax_battery_capacity') | float(100) %}
+    {% set charge_power_w = states('sensor.solax_battery_power_charge') | float(0) %}
+    {% set battery_capacity_kwh = 10.0 %}  {# your usable battery capacity #}
+    {% if charge_power_w <= 0 or soc >= 100 %}
+      0
+    {% else %}
+      {{ (((100 - soc) / 100 * battery_capacity_kwh * 1000) / charge_power_w * 60) | round(0) }}
+    {% endif %}
+```
+
+`sensor.house_average_consumption` is meant to be a helper you create
+yourself (e.g. a `Statistics` or `derivative` helper with a 10-15 min window
+over your house-load sensor) — it exists purely to stop the miner flapping
+on a kettle or oven cycling on.
+
+```yaml
+alias: Miner PV+battery-aware power profile
+description: >
+  Extends the plain-surplus automation with today's remaining PV forecast,
+  battery state of charge / time-to-full, and a smoothed house-consumption
+  baseline, so the profile reacts to where the day's energy is headed
+  instead of just this instant's surplus reading.
+triggers:
+  - trigger: time_pattern
+    minutes: "/5"
+conditions: []
+actions:
+  - variables:
+      # --- ADJUST THESE ENTITY IDS to match your own setup ---
+      pv_surplus: "{{ states('sensor.pv_surplus') | float(0) }}"
+      pv_forecast_remaining_kwh: "{{ states('sensor.energy_production_today_remaining') | float(0) }}"
+      battery_soc: "{{ states('sensor.battery_soc') | float(100) }}"
+      battery_eta_full_min: "{{ states('sensor.battery_time_to_full') | float(999) }}"
+      house_avg_consumption: "{{ states('sensor.house_average_consumption') | float(0) }}"
+
+      # Battery is low: that marginal watt is worth more to the house/
+      # battery right now than to the miner. Cap at "eco" even with some
+      # surplus; force "off" if there's barely any surplus at all.
+      battery_low: "{{ battery_soc < 30 }}"
+      # Battery is effectively full, or about to be within a few minutes:
+      # the marginal watt is now worth more to the miner than the battery,
+      # since it's headed for curtailment/grid export otherwise. Lean into
+      # turbo rather than waiting for a bigger instantaneous surplus.
+      battery_topped_up: "{{ battery_soc > 95 or battery_eta_full_min < 15 }}"
+      # Meaningful sun left today -> safe to spend surplus now instead of
+      # holding back "just in case" for a shortfall that likely won't come.
+      strong_forecast_left: "{{ pv_forecast_remaining_kwh > 5 }}"
+      # Smoothed baseline instead of the raw instantaneous surplus, so a
+      # kettle or oven cycling on for a few minutes doesn't flip the
+      # profile back and forth.
+      effective_surplus: "{{ pv_surplus - (house_avg_consumption * 0.2) }}"
+  - choose:
+      # Battery needs the power more than the miner does right now.
+      - conditions:
+          - "{{ battery_low and effective_surplus < 250 }}"
+        sequence:
+          - action: select.select_option
+            target: { entity_id: select.nerdoctaxe_power_profile }
+            data: { option: "off" }
+      # Battery's done (or nearly), and there's real surplus -> don't waste it.
+      - conditions:
+          - "{{ battery_topped_up and effective_surplus > 100 }}"
+        sequence:
+          - action: select.select_option
+            target: { entity_id: select.nerdoctaxe_power_profile }
+            data: { option: "turbo" }
+      # Solid surplus, or decent surplus with plenty more sun forecast today.
+      - conditions:
+          - "{{ effective_surplus > 250 or (strong_forecast_left and effective_surplus > 100) }}"
+        sequence:
+          - action: select.select_option
+            target: { entity_id: select.nerdoctaxe_power_profile }
+            data: { option: "normal" }
+      - conditions:
+          - "{{ effective_surplus > 50 }}"
+        sequence:
+          - action: select.select_option
+            target: { entity_id: select.nerdoctaxe_power_profile }
+            data: { option: "eco" }
+    default:
+      - action: select.select_option
+        target: { entity_id: select.nerdoctaxe_power_profile }
+        data: { option: "off" }
+mode: single
+```
+
+A `time_pattern` trigger (every 5 minutes) is used instead of a `state`
+trigger with `for:` — a `for:` duration on a continuously-changing power
+sensor practically never fires, since it requires the state to stop
+changing entirely for that whole window. Polling on a timer sidesteps that
+and reads all the current values fresh each time.
+
+`effective_surplus` subtracting a fraction of `house_avg_consumption` is one
+way to build in a safety margin against baseline load that a laggy
+`pv_surplus` sensor hasn't caught up to yet — the `0.2` factor is a guess,
+not a measurement; tune it against your own sensor's actual lag and noise.
+
 ## Tested against
 
 NerdOCTAXE-Gamma (8x BM1370), firmware v1.1.0-rc1, based on
