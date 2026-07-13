@@ -221,7 +221,7 @@ actions:
       soc: "{{ states('sensor.solax_battery_capacity') | float(100) }}"
       ladeleistung_w: "{{ states('sensor.solax_battery_power_charge') | float(0) }}"
       akku_kapazitaet_wh: 24000  # usable battery capacity — adjust to yours
-      hausverbrauch_w: "{{ states('sensor.solax_house_load') | float(0) }}"
+      hausverbrauch_w: "{{ states('sensor.hausverbrauch_schnell') | float(0) }}"
       # Sum of all forecast planes/orientations — a single-array setup
       # only needs the one sensor.energy_production_today_remaining term.
       pv_rest_heute_kwh: >
@@ -286,13 +286,36 @@ actions:
 mode: single
 ```
 
-`sensor.solax_house_load` (instantaneous house consumption) is read into
-`hausverbrauch_w` but deliberately **not** used to gate any decision — the
-grid-meter reading already nets out house consumption vs. PV vs. battery
-flow at the connection point, so gating on it too would be redundant rather
-than additive. It's there for logging/future refinement, e.g. if you want
-to build a smoothed-average helper (`Statistics`/`derivative`) to catch
-cases where the meter reading lags a real consumption change.
+`hausverbrauch_w` is read but deliberately **not** used to gate any
+decision — the grid-meter reading already nets out house consumption vs.
+PV vs. battery flow at the connection point, so gating on it too would be
+redundant rather than additive. It's there for logging/future refinement.
+
+It's *not* read from the SolaX integration's own "House Load" sensor —
+that one turned out to swing negative (confirmed live: -2775 W at one
+point), making it unusable as a plain consumption figure. The dashboard's
+own "current consumption" tile is a built-in aggregate badge with no
+single backing entity to read from either. What worked instead: a
+[Template Sensor helper](https://www.home-assistant.io/integrations/template/)
+computing `PV total + grid − battery charge` from the same fast
+SolaX/Tasmota sensors already used elsewhere in this automation —
+
+```jinja
+{{ (states('sensor.solax_pv_power_total') | float(0))
+ + (states('sensor.bungalow_inverter_watts') | float(0))
+ + (states('sensor.pv_leistung_channel_1_power') | float(0))
+ + (states('sensor.leistung_2') | float(0))
+ - (states('sensor.solax_battery_power_charge') | float(0)) }}
+```
+
+— validated against a slower-but-trusted reference (an evcc "home power"
+sensor) at the same instant: 1788.6 W computed vs. 1786.6 W from evcc,
+well within measurement noise, but updating on every source-sensor change
+instead of evcc's slower poll cycle. The PV terms are specific to this
+setup's three solar sources (SolaX inverter + a second inverter + a
+Shelly PV plug) — total them up for however many sources you actually
+have, and use whatever your own grid meter and battery-charge-power
+entities are.
 
 A `time_pattern` trigger (every 5 minutes) runs alongside the original
 `numeric_state`/`for:` triggers rather than replacing them — `for:` on a
